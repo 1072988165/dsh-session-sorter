@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-sorter",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "会话排序插件：按创建时间或标题重排工作区会话，修复导入会话后侧栏时间线错乱 · DSH session sorter",
   "license": "MIT",
   "type": "module",
