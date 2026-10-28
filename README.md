@@ -8,7 +8,7 @@ A DeepSeek Harness plugin that reorders the sessions of a workspace by creation 
 
 导入外部会话（`dsh-chat-import` 等）之后，侧栏经常变成一团：原生会话还在，一堆导入会话挤在同一分钟，整块把你真实的时间顺序顶乱。原生只提供「最近更新 / 手动排序」两种视图，缺一个「按我想要的规则重排一次」的入口。
 
-这个插件补的就是那一步：选一个工作区 → 选排序依据 → 点一下，顺序写回宿主的工作区账本。
+这个插件补的就是那一步：选一个工作区 → 选排序依据 → 点一下，侧栏立刻按这个顺序排好；想回到原生的「最近更新」排序，随时一键切回。
 
 ## 安装
 
@@ -28,17 +28,21 @@ dsh plugin --profile desktop add dsh-session-sorter
 2. 选工作区（下拉里带该工作区的会话数）
 3. 选排序依据：创建时间 / 标题
 4. 选方向：正序（旧 → 新）/ 倒序（新 → 旧）
-5. 点「执行排序」
-6. 面板会尝试自动把视图切到「手动排序」并刷新；如果没切成功，点右上角 **视图选项 → 排序方式 → 手动排序**
+5. 点「执行排序」——面板会把这次算出的顺序写进「手动排序」，然后自动刷新
+6. 想回到 DSH 原生的按更新时间排序，点同一行的「恢复「最近更新」排序」
 
-> ⚠️ 必须切到「手动排序」才看得见结果。「最近更新」视图永远按最后提示词时间排，会忽略你写入的顺序 —— 这是原生行为，不是插件 bug。
+> ⚠️ 自定义顺序是**浏览器本地**的（`localStorage` 的 `dsh.workspace.view.v5`），换机器/换浏览器不会跟随；「最近更新」视图则永远按每个会话自己的更新时间排，两者是不同视图，不是谁覆盖了谁。
 
 ## 原理
 
-- 会话顺序存在宿主的工作区注册表里（`sessionIds` 数组，durable）。
-- Host 半区通过 `ctx.workspaceRegistry.get(id).mutate()` 一次写入整个顺序 —— 这是 `@deepseek-ai/dsh-workspace` 的官方唯一写路径，不直接改文件、不绕过校验。
+侧栏顺序其实有**两个**来源，两边都要写：
+
+- 宿主的工作区注册表（`sessionIds` 数组）决定「哪些会话属于这个工作区」以及它们的账本顺序。Host 半区用 `ctx.workspaceRegistry.get(id).mutate()` 一次写入 —— `@deepseek-ai/dsh-workspace` 的官方唯一写路径，不直接改文件、不绕过校验。
+- 真正决定**显示顺序**的是浏览器视图 store `dsh.workspace.view.v5`：
+  - `orderBy: "updated"` → 按 `updatedAt = max(createdAt, 最后一条人类消息时间)` 倒序，忽略任何已保存顺序；
+  - `orderBy: "manual"` → 按 `sessionOrderByAccount[workspaceId]` 里那份 id 列表。
+- 所以「执行排序」时，Host 算好顺序后把 `order` 一起返回，浏览器半区把它写进 `sessionOrderByAccount` 并把 `orderBy` 切成 `manual`。只写宿主、或者写一个空顺序，界面都不会变 —— 这正是早期版本「点了没反应」的原因。
 - 排序键来自 `ctx.sessionQuery.listSessions()` 的会话 header（`createdAt` / `title`），只读。
-- 浏览器半区只负责选参数、调 HTTP 路由、把视图模式切到 manual。
 
 ## 边界与已知限制
 

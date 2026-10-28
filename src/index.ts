@@ -136,6 +136,9 @@ export function apply(ctx: Context) {
       direction,
       total: after.length,
       moved: after.filter((id, index) => before[index] !== id).length,
+      // The browser keeps manual order itself (`dsh.workspace.view.v5` →
+      // `sessionOrderByAccount`), so it needs the resulting ids, not just a count.
+      order: after,
     }
   }
 
