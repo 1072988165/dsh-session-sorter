@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { rewriteHeaderLine, shouldSync, syncCreatedAt } from '../dist/maintenance.js'
+import { frameChunks, rewriteHeaderLine, shouldSync, syncCreatedAt } from '../dist/maintenance.js'
 
 const header = (createdAt) => JSON.stringify({ type: 'session', version: 3, id: 'abc', createdAt })
 const event = (time) => JSON.stringify({ type: 'user/message', seq: 1, time })
@@ -59,4 +59,20 @@ test('syncCreatedAt rewrites drifted logs and skips settled ones', async () => {
   assert.equal(result.failed, 0)
   assert.match(files.get('/root/ws/stale/session.v3.jsonl'), /"createdAt":90000/)
   assert.match(files.get('/root/ws/fresh/session.v3.jsonl'), /"createdAt":1[,}]/)
+})
+
+test('frameChunks keeps the header alone in the first frame', () => {
+  const text = [header(1), event(2), event(3), ''].join('\n')
+  const chunks = frameChunks(text)
+  assert.equal(chunks.length, 2)
+  assert.equal(chunks[0], `${header(1)}\n`)
+  assert.equal(chunks[1], `${event(2)}\n${event(3)}\n`)
+  assert.equal(chunks.join(''), text)
+})
+
+test('frameChunks batches long logs into several follow-up frames', () => {
+  const lines = [header(1), ...Array.from({ length: 1025 }, (_, i) => event(i + 2))]
+  const chunks = frameChunks(`${lines.join('\n')}\n`)
+  assert.equal(chunks.length, 4)
+  assert.equal(chunks.join(''), `${lines.join('\n')}\n`)
 })

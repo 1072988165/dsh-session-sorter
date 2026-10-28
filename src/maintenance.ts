@@ -9,13 +9,37 @@
 // This pass rewrites the log header's `createdAt` to the session's last activity
 // time, which is the value the sidebar actually orders by. It only touches logs
 // whose header is behind the list metadata, so a normal start is a no-op.
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
+
+/** Lines per follow-up frame; only the framing matters, not the batch size. */
+const FRAME_LINES = 512
+
+/** Split a log into frame payloads: the header alone, then line batches. */
+export function frameChunks(text: string): string[] {
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  const chunks = [`${lines[0]}\n`]
+  for (let i = 1; i < lines.length; i += FRAME_LINES) chunks.push(`${lines.slice(i, i + FRAME_LINES).join('\n')}\n`)
+  return chunks
+}
+
+/** Compress one payload into a streamed (size-less, checksummed) zstd frame. */
+function zstdFrame(text: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('zstd', ['-3', '--check', '-c', '-'])
+    const out: Buffer[] = []
+    child.stdout.on('data', (data: Buffer) => out.push(data))
+    child.on('error', reject)
+    child.on('close', (code) => (code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(`zstd exited with ${code}`))))
+    child.stdin.end(text)
+  })
+}
 
 /** Placement of one session log inside the sessions root. */
 export const LOG_DIR = /^session\.v\d+\.jsonl(\.zstd)?$/
@@ -114,13 +138,17 @@ export function nodeIo(root = sessionsRoot()): SyncIo {
     },
     write: async (path, text) => {
       if (path.endsWith('.zstd')) {
-        const plain = `${path}.tmp`
-        await writeFile(plain, text, 'utf8')
+        // The app writes logs as a chain of streamed frames (header frame first,
+        // then one frame per appended batch). A single frame carrying the whole
+        // file — with the size in the frame header — is rejected by the session
+        // reader as a corrupt log, which drops the session from the sidebar.
+        const bytes = Buffer.concat(await Promise.all(frameChunks(text).map(zstdFrame)))
+        await writeFile(`${path}.new`, bytes)
         try {
-          await run('zstd', ['-q', '-f', '-3', plain, '-o', `${path}.new`])
+          const { stdout } = await run('zstd', ['-dc', `${path}.new`], { encoding: 'buffer', maxBuffer: 512 * 1024 * 1024 })
+          if (stdout.toString('utf8') !== text) throw new Error(`zstd round-trip mismatch for ${path}`)
           await rename(`${path}.new`, path)
         } finally {
-          await unlink(plain).catch(() => {})
           await unlink(`${path}.new`).catch(() => {})
         }
         return
