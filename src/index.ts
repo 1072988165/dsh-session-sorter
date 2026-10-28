@@ -9,6 +9,8 @@
 // registry, not in the browser. Only the host process can write it.
 import type { Context } from '@deepseek-ai/cordis'
 
+import { nodeIo, syncCreatedAt } from './maintenance.js'
+
 // Plugin display name, shown in loader diagnostics.
 export const name = 'dsh-session-sorter'
 
@@ -197,4 +199,26 @@ export function apply(ctx: Context) {
       disposeSort()
     }
   }, 'dsh-session-sorter: routes')
+
+  // The sidebar orders rows by `header.createdAt`, so a session that is still
+  // being prompted keeps its old slot. Align the headers once per start; the
+  // pass is a no-op unless some log is behind the listing metadata.
+  ctx.effect(() => {
+    if (process.env.DSH_SESSION_SORTER_SYNC_CREATED === '0') return () => {}
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const sessions = await query.listSessions()
+          const result = await syncCreatedAt(sessions, nodeIo())
+          if (result.fixed > 0) {
+            console.log(`[dsh-session-sorter] createdAt synced ${result.fixed}/${result.scanned}`)
+          }
+        } catch (error) {
+          console.warn('[dsh-session-sorter] createdAt sync skipped:', error)
+        }
+      })()
+    }, 8_000)
+    timer.unref?.()
+    return () => clearTimeout(timer)
+  }, 'dsh-session-sorter: createdAt sync')
 }

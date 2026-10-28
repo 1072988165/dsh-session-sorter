@@ -35,21 +35,41 @@ dsh plugin --profile desktop add dsh-session-sorter
 
 ## 原理
 
-侧栏顺序其实有**两个**来源，两边都要写：
+**先说关键事实**（2026-10-28 在 DSH NEXT 上逐条验证）：当前侧栏的行顺序来自宿主会话序列化器 ——
 
-- 宿主的工作区注册表（`sessionIds` 数组）决定「哪些会话属于这个工作区」以及它们的账本顺序。Host 半区用 `ctx.workspaceRegistry.get(id).mutate()` 一次写入 —— `@deepseek-ai/dsh-workspace` 的官方唯一写路径，不直接改文件、不绕过校验。
-- 真正决定**显示顺序**的是浏览器视图 store `dsh.workspace.view.v5`：
-  - `orderBy: "updated"` → 按 `updatedAt = max(createdAt, 最后一条人类消息时间)` 倒序，忽略任何已保存顺序；
-  - `orderBy: "manual"` → 按 `sessionOrderByAccount[workspaceId]` 里那份 id 列表。
-- 所以「执行排序」时，Host 算好顺序后把 `order` 一起返回，浏览器半区把它写进 `sessionOrderByAccount` 并把 `orderBy` 切成 `manual`。只写宿主、或者写一个空顺序，界面都不会变 —— 这正是早期版本「点了没反应」的原因。
-- 排序键来自 `ctx.sessionQuery.listSessions()` 的会话 header（`createdAt` / `title`），只读。
+```
+compareSessions(a, b) = b.header.createdAt - a.header.createdAt
+```
+
+也就是**按会话创建时间倒序**，而不是按最近更新时间。行右侧那个时间才是 `updatedAt = max(createdAt, 最后一条用户消息时间)`。
+两者一旦不一致，就表现为「刚聊过的会话沉在下面、排序乱了」：导入会话、或者聊了很久的老会话都会这样。
+
+插件因此做两件事：
+
+**1. 顺序层（工作区账本）**
+
+- 宿主的工作区注册表（`sessionIds` 数组）决定「哪些会话属于这个工作区」以及账本顺序。Host 半区用 `ctx.workspaceRegistry.get(id).mutate()` 一次写入 —— `@deepseek-ai/dsh-workspace` 的官方唯一写路径，不直接改文件。
+- 老侧栏另有一层浏览器视图 store `dsh.workspace.view.v5`（`orderBy: "updated" | "manual"`）。「执行排序」时 Host 把算好的 `order` 一起返回，浏览器半区写进 `sessionOrderByAccount` 并切到 `manual`。
+- 排序键来自 `ctx.sessionQuery.listSessions()` 的 header（`createdAt` / `title`），只读。
+
+**2. 时间层（当前侧栏真正生效的一层）**
+
+Host 半区在启动 8 秒后跑一次 `src/maintenance.ts` 的 `syncCreatedAt()`，把每个会话日志 header 的 `createdAt` 同步成它的最后活动时间：
+
+- 只处理 `updatedAt - createdAt > 60s` 的会话，正常启动是空操作；
+- 跳过 3 分钟内还在写入的日志（避免打断正在进行的会话）；
+- 每个 `.zstd` 日志：解压 → 只改第一行 header 的 `createdAt` → 重新压缩 → 原子替换；
+- 改之前把原值写进 `~/.dsh/dsh-session-sorter/created-at-origins.jsonl` 作为审计痕迹；
+- 失败只计数、不抛出，不会阻塞启动；
+- `DSH_SESSION_SORTER_SYNC_CREATED=0` 可关闭。
 
 ## 边界与已知限制
 
 - 只排序**当前工作区**的会话，不跨工作区搬动。
 - 已归档会话保留它在 `sessionIds` 里的槽位（原生设计），排序时一并参与。
-- 日志缺失、列表里查不到的会话不参与排序，但也不会被丢弃 —— 它们保持原相对顺序排到末尾。
-- 排序 ≠ 改时间戳。本插件不修改任何会话日志，纯顺序操作，可反复执行。
+- 日志缺失、列表里查不到的会话不参与排序，但也不会被丢弃 —— 保持原相对顺序排到末尾。
+- 时间层会**改写日志 header 的 `createdAt`**（仅这一行、仅这一个字段）。这是在「侧栏按 createdAt 排序」这一当前行为下，让顺序跟上更新时间的唯一手段；原值可在上面那份审计文件里找回。
+- 时间层在一轮启动内只跑一次：本次运行中又续聊的老会话，会在**下次启动**被挪到正确位置。
 
 ## 开发
 
